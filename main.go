@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -50,7 +51,18 @@ func getTimeFromUnix(timestampMs int64) time.Time {
 }
 
 func (c *client) prepareForFlush() {
-	// TODO: combine data from POST bodies and prepare it for sending
+	c.dataToSend = c.dataToSend[:0]
+	for i, b := range c.postBodies {
+		c.dataToSend = append(c.dataToSend, b...)
+		c.dataToSend = append(c.dataToSend, linesSeparator...)
+		c.postBodies[i] = nil
+	}
+
+	c.postBodies = c.postBodies[:0]
+	c.length = 0
+
+	date := c.currentDay.Format("2006-01-02")
+	c.path = "/chat/" + date + "/content_logs_" + date + "_" + strconv.Itoa(c.id)
 }
 
 func (c *client) uploadPart() {
