@@ -2,6 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/valyala/fasthttp"
@@ -103,5 +106,24 @@ func main() {
 		}
 	}
 
+	sigs := make(chan os.Signal)
+	programIsFinished := make(chan bool)
+
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		<-sigs
+
+		for _, c := range clientsData {
+			if c.length > 0 {
+				c.flushFinally()
+			}
+		}
+
+		programIsFinished <- true
+	}()
+
 	go fasthttp.ListenAndServe(":8080", fastHTTPHandler)
+
+	<-programIsFinished
 }
