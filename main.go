@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 	"time"
 
@@ -29,12 +30,16 @@ type request struct {
 }
 
 type client struct {
-	id             int
-	postBodies     [][]byte
-	length         int
-	dataToSend     []byte
-	currentDay     time.Time
-	path           string
+	id         int
+	postBodies [][]byte
+	length     int
+	dataToSend []byte
+	currentDay time.Time
+	path       string
+
+	mu       sync.Mutex
+	uploadMu sync.Mutex
+
 	uploading      *s3.CreateMultipartUploadOutput
 	completedParts []*s3.CompletedPart
 }
@@ -154,17 +159,21 @@ func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
 	if err := json.Unmarshal(postBody, &postData); err != nil {
 		panic(err)
 	}
+
 	ctx.SetStatusCode(201)
+
 	c := clientsData[postData.Client_id-1]
 
 	tm := getTimeFromUnix(postData.Timestamp)
+
+	c.mu.Lock()
+	defer c.mu.Unlock()
 
 	if c.currentDay.IsZero() {
 		c.currentDay = getDayBeginning(tm)
 	} else if isDifferentDay(c, tm) {
 		c.flushFinally()
 		c.currentDay = getDayBeginning(tm)
-		return
 	}
 
 	c.postBodies = append(c.postBodies, postBody)
