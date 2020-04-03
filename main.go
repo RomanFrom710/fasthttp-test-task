@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"os"
 	"os/signal"
@@ -8,6 +9,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/valyala/fasthttp"
 )
 
@@ -24,15 +28,19 @@ type request struct {
 }
 
 type client struct {
-	id         int
-	postBodies [][]byte
-	length     int
-	dataToSend []byte
-	currentDay time.Time
-	path       string
+	id             int
+	postBodies     [][]byte
+	length         int
+	dataToSend     []byte
+	currentDay     time.Time
+	path           string
+	uploading      *s3.CreateMultipartUploadOutput
+	completedParts []*s3.CompletedPart
 }
 
 var clientsData [10]*client
+
+var svc *s3.S3
 
 func getDayBeginning(tm time.Time) time.Time {
 	year, month, day := tm.Date()
@@ -65,12 +73,63 @@ func (c *client) prepareForFlush() {
 	c.path = "/chat/" + date + "/content_logs_" + date + "_" + strconv.Itoa(c.id)
 }
 
-func (c *client) uploadPart() {
+func (c *client) createUploadingIfNotExist() {
+	if c.uploading != nil {
+		return
+	}
 
+	input := &s3.CreateMultipartUploadInput{
+		Bucket:      aws.String("s3test-roman"),
+		Key:         aws.String(c.path),
+		ContentType: aws.String("application/x-ndjson"),
+	}
+
+	resp, err := svc.CreateMultipartUpload(input)
+	if err != nil {
+		panic(err)
+	}
+	c.uploading = resp
+}
+
+func (c *client) uploadPart() {
+	c.createUploadingIfNotExist()
+
+	partNumber := aws.Int64(int64(len(c.completedParts) + 1))
+	partInput := s3.UploadPartInput{
+		Body:          bytes.NewReader(c.dataToSend),
+		Bucket:        c.uploading.Bucket,
+		Key:           c.uploading.Key,
+		PartNumber:    partNumber,
+		UploadId:      c.uploading.UploadId,
+		ContentLength: aws.Int64(int64(len(c.dataToSend))),
+	}
+	resp, err := svc.UploadPart(&partInput)
+	if err != nil {
+		panic(err)
+	}
+	completedPart := &s3.CompletedPart{
+		ETag:       resp.ETag,
+		PartNumber: partNumber,
+	}
+	c.completedParts = append(c.completedParts, completedPart)
 }
 
 func (c *client) completeUploading() {
+	completeInput := &s3.CompleteMultipartUploadInput{
+		Bucket:   c.uploading.Bucket,
+		Key:      c.uploading.Key,
+		UploadId: c.uploading.UploadId,
+		MultipartUpload: &s3.CompletedMultipartUpload{
+			Parts: c.completedParts,
+		},
+	}
+	_, err := svc.CompleteMultipartUpload(completeInput)
+	if err != nil {
+		panic(err)
+	}
 
+	c.uploading = nil
+	c.completedParts = nil
 }
 
 func (c *client) flush() {
@@ -121,6 +180,9 @@ func main() {
 			dataToSend: make([]byte, 0, bufferSize),
 		}
 	}
+
+	sess := session.Must(session.NewSession(&aws.Config{Region: aws.String("eu-central-1")}))
+	svc = s3.New(sess)
 
 	sigs := make(chan os.Signal)
 	programIsFinished := make(chan bool)
