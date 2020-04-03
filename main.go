@@ -15,8 +15,9 @@ import (
 	"github.com/valyala/fasthttp"
 )
 
-const minimumSize = 500
-const bufferSize = 6000000
+const oneMb = 1024 * 1024
+const minimumSize = 5 * oneMb
+const bufferSize = 6 * oneMb
 
 var linesSeparator = []byte{10, 13}
 
