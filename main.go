@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
@@ -98,6 +99,7 @@ func (c *client) createUploadingIfNotExist() {
 }
 
 func (c *client) uploadPart() {
+	fmt.Println("Uploading for " + c.path)
 	c.createUploadingIfNotExist()
 
 	partNumber := aws.Int64(int64(len(c.completedParts) + 1))
@@ -121,6 +123,7 @@ func (c *client) uploadPart() {
 }
 
 func (c *client) completeUploading() {
+	fmt.Println("Finishing uploading for " + c.path)
 	completeInput := &s3.CompleteMultipartUploadInput{
 		Bucket:   c.uploading.Bucket,
 		Key:      c.uploading.Key,
