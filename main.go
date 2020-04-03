@@ -23,6 +23,8 @@ const bufferSize = 6 * oneMb
 
 var linesSeparator = []byte{10, 13}
 
+var wg sync.WaitGroup
+
 type request struct {
 	Text       string
 	Content_id int
@@ -149,9 +151,11 @@ func (c *client) flush() {
 func (c *client) flushFinally() {
 	c.prepareForFlush()
 
+	wg.Add(1)
 	go func() {
 		c.uploadPart()
 		c.completeUploading()
+		wg.Done()
 	}()
 }
 
@@ -217,4 +221,5 @@ func main() {
 	go fasthttp.ListenAndServe(":8080", fastHTTPHandler)
 
 	<-programIsFinished
+	wg.Wait()
 }
