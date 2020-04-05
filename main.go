@@ -183,8 +183,11 @@ func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
 		c.currentDay = getDayBeginning(tm)
 	}
 
-	c.postBodies = append(c.postBodies, postBody)
-	c.length += len(postBody) + len(linesSeparator)
+	length := len(postBody)
+	postBodyCopy := make([]byte, length)
+	copy(postBodyCopy, postBody)
+	c.postBodies = append(c.postBodies, postBodyCopy)
+	c.length += length + len(linesSeparator)
 	if c.length > minimumSize {
 		c.flush()
 	}
