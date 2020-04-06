@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,8 +19,9 @@ import (
 )
 
 const oneMb = 1024 * 1024
-const minimumSize = 5 * oneMb
-const bufferSize = 6 * oneMb
+const minimumSize = 5 * oneMb     // AWS restriction
+const lengthCheckFrequency = 1000 // Each nth request for a particular client is checked if its gzip version greater than minimumSize
+const bufferSize = 7 * oneMb      // So it can fit some requests between reaching minimumSize and length check
 
 var linesSeparator = []byte{10, 13}
 
@@ -33,14 +35,15 @@ type request struct {
 }
 
 type client struct {
-	id         int
-	postBodies [][]byte
-	length     int
-	dataToSend []byte
-	currentDay time.Time
-	path       string
+	id           int
+	currentData  []byte
+	dataToSend   bytes.Buffer
+	requestCount int
+	currentDay   time.Time
+	path         string
 
-	mu sync.Mutex
+	mu       sync.Mutex
+	uploadMu sync.Mutex
 
 	uploading      *s3.CreateMultipartUploadOutput
 	completedParts []*s3.CompletedPart
@@ -66,30 +69,16 @@ func getTimeFromUnix(timestampMs int64) time.Time {
 	return time.Unix(seconds, nanoseconds)
 }
 
-func (c *client) prepareForFlush() {
-	c.dataToSend = c.dataToSend[:0]
-	for i, b := range c.postBodies {
-		c.dataToSend = append(c.dataToSend, b...)
-		c.dataToSend = append(c.dataToSend, linesSeparator...)
-		c.postBodies[i] = nil
-	}
-
-	c.postBodies = c.postBodies[:0]
-	c.length = 0
-
-	date := c.currentDay.Format("2006-01-02")
-	c.path = "/chat/" + date + "/content_logs_" + date + "_" + strconv.Itoa(c.id)
-}
-
 func (c *client) createUploadingIfNotExist() {
 	if c.uploading != nil {
 		return
 	}
 
 	input := &s3.CreateMultipartUploadInput{
-		Bucket:      aws.String("s3test-roman"),
-		Key:         aws.String(c.path),
-		ContentType: aws.String("application/x-ndjson"),
+		Bucket:          aws.String("s3test-roman"),
+		Key:             aws.String(c.path),
+		ContentType:     aws.String("application/x-ndjson"),
+		ContentEncoding: aws.String("gzip"),
 	}
 
 	resp, err := svc.CreateMultipartUpload(input)
@@ -105,12 +94,12 @@ func (c *client) uploadPart() {
 
 	partNumber := aws.Int64(int64(len(c.completedParts) + 1))
 	partInput := s3.UploadPartInput{
-		Body:          bytes.NewReader(c.dataToSend),
+		Body:          bytes.NewReader(c.dataToSend.Bytes()),
 		Bucket:        c.uploading.Bucket,
 		Key:           c.uploading.Key,
 		PartNumber:    partNumber,
 		UploadId:      c.uploading.UploadId,
-		ContentLength: aws.Int64(int64(len(c.dataToSend))),
+		ContentLength: aws.Int64(int64(c.dataToSend.Len())),
 	}
 	resp, err := svc.UploadPart(&partInput)
 	if err != nil {
@@ -121,6 +110,7 @@ func (c *client) uploadPart() {
 		PartNumber: partNumber,
 	}
 	c.completedParts = append(c.completedParts, completedPart)
+	c.dataToSend.Reset()
 }
 
 func (c *client) completeUploading() {
@@ -142,23 +132,33 @@ func (c *client) completeUploading() {
 	c.completedParts = nil
 }
 
-func (c *client) flush() {
-	wg.Add(1)
-	c.prepareForFlush()
-
-	go func() {
-		c.uploadPart()
-		wg.Done()
-	}()
+func (c *client) prepareDataToSend() {
+	w := gzip.NewWriter(&c.dataToSend)
+	w.Write(c.currentData)
+	w.Close()
 }
 
-func (c *client) flushFinally() {
+func (c *client) preparePath() {
+	date := c.currentDay.Format("2006-01-02")
+	c.path = "/chat/" + date + "/content_logs_" + date + "_" + strconv.Itoa(c.id)
+}
+
+func (c *client) flush(isFinal bool) {
 	wg.Add(1)
-	c.prepareForFlush()
+	c.preparePath()
+	if c.dataToSend.Len() == 0 {
+		c.prepareDataToSend()
+	}
+	c.requestCount = 0
 
 	go func() {
+		c.uploadMu.Lock()
 		c.uploadPart()
-		c.completeUploading()
+
+		if isFinal {
+			c.completeUploading()
+		}
+		c.uploadMu.Unlock()
 		wg.Done()
 	}()
 }
@@ -183,27 +183,31 @@ func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
 	if c.currentDay.IsZero() {
 		c.currentDay = getDayBeginning(tm)
 	} else if isDifferentDay(c, tm) {
-		c.flushFinally()
+		c.flush(true)
 		c.currentDay = getDayBeginning(tm)
 	}
 
-	length := len(postBody)
-	postBodyCopy := make([]byte, length)
-	copy(postBodyCopy, postBody)
-	c.postBodies = append(c.postBodies, postBodyCopy)
+	c.requestCount++
+	c.currentData = append(c.currentData, postBody...)
+	c.currentData = append(c.currentData, linesSeparator...)
 
-	c.length += length + len(linesSeparator)
-	if c.length > minimumSize {
-		c.flush()
+	if c.requestCount%lengthCheckFrequency == 0 {
+		c.prepareDataToSend()
+		if c.dataToSend.Len() > minimumSize {
+			c.flush(false)
+		} else {
+			c.dataToSend.Reset()
+		}
 	}
 }
 
 func main() {
 	for i := range clientsData {
 		clientsData[i] = &client{
-			id:         i + 1,
-			dataToSend: make([]byte, 0, bufferSize),
+			id:          i + 1,
+			currentData: make([]byte, 0, bufferSize),
 		}
+		clientsData[i].dataToSend.Grow(bufferSize)
 	}
 
 	sess := session.Must(session.NewSession(&aws.Config{Region: aws.String("eu-central-1")}))
@@ -217,11 +221,12 @@ func main() {
 	go func() {
 		<-sigs
 
-		wg.Wait()
 		for _, c := range clientsData {
-			if c.length > 0 {
-				c.flushFinally()
+			c.mu.Lock()
+			if len(c.currentData) > 0 {
+				c.flush(true)
 			}
+			c.mu.Unlock()
 		}
 
 		programIsFinished <- true
