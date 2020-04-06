@@ -14,6 +14,6 @@ func isDifferentDay(currentDay, tm time.Time) bool {
 
 func getTimeFromUnix(timestampMs int64) time.Time {
 	seconds := timestampMs / 1000
-	nanoseconds := (timestampMs % 1000) * 1000
-	return time.Unix(seconds, nanoseconds)
+	nanoseconds := (timestampMs % 1000) * 1000000
+	return time.Unix(seconds, nanoseconds).UTC()
 }
