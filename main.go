@@ -85,7 +85,8 @@ func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
 	postBody := ctx.PostBody()
 
 	if err := json.Unmarshal(postBody, &postData); err != nil {
-		panic(err)
+		ctx.SetStatusCode(400)
+		return
 	}
 
 	ctx.SetStatusCode(201)
