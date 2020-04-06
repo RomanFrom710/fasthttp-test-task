@@ -65,7 +65,6 @@ func (c *client) flush(isFinal bool) {
 	if c.dataToSend.Len() == 0 {
 		c.prepareDataToSend()
 	}
-	c.requestCount = 0
 
 	go func() {
 		c.uploadMu.Lock()
@@ -109,9 +108,11 @@ func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
 	c.currentData = append(c.currentData, postBody...)
 	c.currentData = append(c.currentData, linesSeparator...)
 
-	if c.requestCount%lengthCheckFrequency == 0 {
+	if c.requestCount%lengthCheckFrequency == 0 && c.dataToSend.Len() == 0 {
+		c.requestCount = 0
 		c.prepareDataToSend()
 		if c.dataToSend.Len() > minimumSize {
+			c.currentData = c.currentData[:0]
 			c.flush(false)
 		} else {
 			c.dataToSend.Reset()
