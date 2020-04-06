@@ -40,8 +40,7 @@ type client struct {
 	currentDay time.Time
 	path       string
 
-	mu       sync.Mutex
-	uploadMu sync.Mutex
+	mu sync.Mutex
 
 	uploading      *s3.CreateMultipartUploadOutput
 	completedParts []*s3.CompletedPart
@@ -144,14 +143,19 @@ func (c *client) completeUploading() {
 }
 
 func (c *client) flush() {
+	wg.Add(1)
 	c.prepareForFlush()
-	go c.uploadPart()
+
+	go func() {
+		c.uploadPart()
+		wg.Done()
+	}()
 }
 
 func (c *client) flushFinally() {
+	wg.Add(1)
 	c.prepareForFlush()
 
-	wg.Add(1)
 	go func() {
 		c.uploadPart()
 		c.completeUploading()
@@ -187,6 +191,7 @@ func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
 	postBodyCopy := make([]byte, length)
 	copy(postBodyCopy, postBody)
 	c.postBodies = append(c.postBodies, postBodyCopy)
+
 	c.length += length + len(linesSeparator)
 	if c.length > minimumSize {
 		c.flush()
@@ -212,6 +217,7 @@ func main() {
 	go func() {
 		<-sigs
 
+		wg.Wait()
 		for _, c := range clientsData {
 			if c.length > 0 {
 				c.flushFinally()
