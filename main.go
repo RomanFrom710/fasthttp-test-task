@@ -23,7 +23,7 @@ const minimumSize = 5 * oneMb     // AWS restriction
 const lengthCheckFrequency = 1000 // Each nth request for a particular client is checked if its gzip version greater than minimumSize
 const bufferSize = 7 * oneMb      // So it can fit some requests between reaching minimumSize and length check
 
-var linesSeparator = []byte{10, 13}
+var linesSeparator = []byte{13}
 
 var wg sync.WaitGroup
 
