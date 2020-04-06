@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"compress/gzip"
 	"encoding/json"
-	"fmt"
 	"os"
 	"os/signal"
 	"strconv"
@@ -12,8 +11,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/aws/aws-sdk-go/aws"
-	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/valyala/fasthttp"
 )
@@ -51,87 +48,6 @@ type client struct {
 
 var clientsData [10]*client
 
-var svc *s3.S3
-
-func getDayBeginning(tm time.Time) time.Time {
-	year, month, day := tm.Date()
-	return time.Date(year, month, day, 0, 0, 0, 0, time.UTC)
-}
-
-func isDifferentDay(c *client, tm time.Time) bool {
-	diff := tm.Sub(c.currentDay)
-	return diff.Hours() >= 24
-}
-
-func getTimeFromUnix(timestampMs int64) time.Time {
-	seconds := timestampMs / 1000
-	nanoseconds := (timestampMs % 1000) * 1000
-	return time.Unix(seconds, nanoseconds)
-}
-
-func (c *client) createUploadingIfNotExist() {
-	if c.uploading != nil {
-		return
-	}
-
-	input := &s3.CreateMultipartUploadInput{
-		Bucket:          aws.String("s3test-roman"),
-		Key:             aws.String(c.path),
-		ContentType:     aws.String("application/x-ndjson"),
-		ContentEncoding: aws.String("gzip"),
-	}
-
-	resp, err := svc.CreateMultipartUpload(input)
-	if err != nil {
-		panic(err)
-	}
-	c.uploading = resp
-}
-
-func (c *client) uploadPart() {
-	fmt.Println("Uploading for " + c.path)
-	c.createUploadingIfNotExist()
-
-	partNumber := aws.Int64(int64(len(c.completedParts) + 1))
-	partInput := s3.UploadPartInput{
-		Body:          bytes.NewReader(c.dataToSend.Bytes()),
-		Bucket:        c.uploading.Bucket,
-		Key:           c.uploading.Key,
-		PartNumber:    partNumber,
-		UploadId:      c.uploading.UploadId,
-		ContentLength: aws.Int64(int64(c.dataToSend.Len())),
-	}
-	resp, err := svc.UploadPart(&partInput)
-	if err != nil {
-		panic(err)
-	}
-	completedPart := &s3.CompletedPart{
-		ETag:       resp.ETag,
-		PartNumber: partNumber,
-	}
-	c.completedParts = append(c.completedParts, completedPart)
-	c.dataToSend.Reset()
-}
-
-func (c *client) completeUploading() {
-	fmt.Println("Finishing uploading for " + c.path)
-	completeInput := &s3.CompleteMultipartUploadInput{
-		Bucket:   c.uploading.Bucket,
-		Key:      c.uploading.Key,
-		UploadId: c.uploading.UploadId,
-		MultipartUpload: &s3.CompletedMultipartUpload{
-			Parts: c.completedParts,
-		},
-	}
-	_, err := svc.CompleteMultipartUpload(completeInput)
-	if err != nil {
-		panic(err)
-	}
-
-	c.uploading = nil
-	c.completedParts = nil
-}
-
 func (c *client) prepareDataToSend() {
 	w := gzip.NewWriter(&c.dataToSend)
 	w.Write(c.currentData)
@@ -158,6 +74,7 @@ func (c *client) flush(isFinal bool) {
 		if isFinal {
 			c.completeUploading()
 		}
+
 		c.uploadMu.Unlock()
 		wg.Done()
 	}()
@@ -182,7 +99,7 @@ func fastHTTPHandler(ctx *fasthttp.RequestCtx) {
 
 	if c.currentDay.IsZero() {
 		c.currentDay = getDayBeginning(tm)
-	} else if isDifferentDay(c, tm) {
+	} else if isDifferentDay(c.currentDay, tm) {
 		c.flush(true)
 		c.currentDay = getDayBeginning(tm)
 	}
@@ -210,8 +127,7 @@ func main() {
 		clientsData[i].dataToSend.Grow(bufferSize)
 	}
 
-	sess := session.Must(session.NewSession(&aws.Config{Region: aws.String("eu-central-1")}))
-	svc = s3.New(sess)
+	initializeSvc()
 
 	sigs := make(chan os.Signal)
 	programIsFinished := make(chan bool)
